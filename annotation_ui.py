@@ -9,6 +9,7 @@ from PyQt6.QtCore import Qt, QPointF
 from fisheye_calibrator import FisheyeCalibrator
 import cv2
 import numpy as np
+from PyQt6.QtWidgets import QMenu
 
 class ImageAnnotationApp(QMainWindow):
     def __init__(self):
@@ -100,6 +101,35 @@ class ImageAnnotationApp(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock_widget)
         self._update_coordinate_tree()
 
+        self.coord_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.coord_tree.customContextMenuRequested.connect(self._show_context_menu)
+
+    def _show_context_menu(self, position):
+        item = self.coord_tree.itemAt(position)
+        if not item:
+            return
+
+        menu = QMenu(self)
+
+        parent = item.parent()
+        if parent is None:
+            delete_action = menu.addAction("删除该分类")
+            action = menu.exec(self.coord_tree.mapToGlobal(position))
+            if action == delete_action:
+                index = self.coord_tree.indexOfTopLevelItem(item)
+                if index >= 0:
+                    reply = QMessageBox.question(self, "确认", f"确定删除分类 '{self.classes[index]['name']}'？",
+                                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                    if reply == QMessageBox.StandardButton.Yes:
+                        self._delete_class(index)
+        else:
+            class_index = self.coord_tree.indexOfTopLevelItem(parent)
+            point_index = parent.indexOfChild(item)
+            delete_action = menu.addAction("删除该点")
+            action = menu.exec(self.coord_tree.mapToGlobal(position))
+            if action == delete_action:
+                self._delete_point(class_index, point_index)
+
     def _update_coordinate_tree(self):
         """更新坐标树显示"""
         self.coord_tree.clear()
@@ -112,6 +142,34 @@ class ImageAnnotationApp(QMainWindow):
                 class_item.addChild(coord_item)
             self.coord_tree.addTopLevelItem(class_item)
         self.coord_tree.expandAll()
+
+    def _delete_class(self, class_index):
+        cls = self.classes[class_index]
+        for dot in cls['dots']:
+            self.scene.removeItem(dot)
+        del self.classes[class_index]
+
+        if len(self.classes) == 0:
+            initial_color = QColor.fromHsv(0, 255, 255)  
+            self.classes.append({
+                'name': 'Line 1',
+                'color': initial_color,
+                'points': [],
+                'dots': []
+            })
+            self.selected_class_index = 0
+        else:
+            self.selected_class_index = min(class_index, len(self.classes) - 1)
+
+        self._update_coordinate_tree()
+
+    def _delete_point(self, class_index, point_index):
+        cls = self.classes[class_index]
+        dot_item = cls['dots'].pop(point_index)
+        if dot_item:
+            self.scene.removeItem(dot_item)
+        cls['points'].pop(point_index)
+        self._update_coordinate_tree()
 
     def _open_image(self):
         """打开图像文件"""

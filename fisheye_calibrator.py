@@ -105,7 +105,7 @@ class FisheyeCalibrator:
             (initial_params[1]*0.8, initial_params[1]*1.2),  # fy
             (w*0.3, w*0.7),  # cx
             (h*0.3, h*0.7),  # cy
-            (-1.0, 1.0)       # k1
+            (-0.5, 0.5)       # k1
         ]
 
         result = self._run_optimization(
