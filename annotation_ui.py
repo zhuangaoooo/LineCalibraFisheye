@@ -1,3 +1,4 @@
+import os
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QGraphicsView, QGraphicsScene,
     QGraphicsEllipseItem, QFileDialog, QDockWidget, QTreeWidget,
@@ -10,6 +11,9 @@ from fisheye_calibrator import FisheyeCalibrator
 import cv2
 import numpy as np
 from PyQt6.QtWidgets import QMenu
+import json
+from PyQt6.QtWidgets import QFileDialog, QMessageBox
+
 
 class ImageAnnotationApp(QMainWindow):
     def __init__(self):
@@ -31,8 +35,10 @@ class ImageAnnotationApp(QMainWindow):
         self.current_image_path = None
         self.image_size = None
         self.image = None
+        self.undistorted_img = None
         self.classes = []
         self.selected_class_index = 0
+        self.calibrator = None
 
     def _create_initial_class(self):
         """创建初始默认分类"""
@@ -67,6 +73,21 @@ class ImageAnnotationApp(QMainWindow):
         process_action = QAction("去畸变", self)
         process_action.triggered.connect(self.on_process_triggered)
         toolbar.addAction(process_action)
+        
+        # 导出按钮
+        export_action = QAction("导出矫正图片", self)
+        export_action.triggered.connect(self.export_result)
+        toolbar.addAction(export_action)
+
+        # 新建导出校正数据按钮
+        export_calibration_action = QAction("导出校正数据", self)
+        export_calibration_action.triggered.connect(self.export_calibration_data)
+        toolbar.addAction(export_calibration_action)
+
+        # 新增加载校正数据按钮
+        load_calibration_action = QAction("加载校正数据", self)
+        load_calibration_action.triggered.connect(self.load_calibration_data)
+        toolbar.addAction(load_calibration_action)
 
         # 设置工具提示
         open_action.setToolTip("打开图像文件")
@@ -234,9 +255,146 @@ class ImageAnnotationApp(QMainWindow):
         calibrator.optimize_step2()
         calibrator.optimize_step3()
         K, D = calibrator.K, calibrator.D
+        self.calibrator = calibrator
         print(f"优化后的内参矩阵K:\n{K}")
         print(f"优化后的畸变系数D:\n{D}")
         self.show_comparison(K, D)
+        
+    def export_result(self):
+        """导出处理结果"""
+        if  np.any(self.undistorted_img == None):
+            QMessageBox.warning(self, "错误", "请先处理图像")
+            return
+
+        # 创建 undistortedImg 文件夹
+        output_dir = "undistortedImg"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"创建文件夹失败: {str(e)}")
+            return
+
+        # 获取原始图像名称
+        if not self.current_image_path:
+            QMessageBox.warning(self, "错误", "未加载原始图像路径")
+            return
+
+        original_name = os.path.splitext(os.path.basename(self.current_image_path))[0]
+        output_path = os.path.join(output_dir, f"{original_name}.jpg")
+
+        # 导出校正后的图像
+        try:
+            cv2.imwrite(output_path, self.undistorted_img)
+            QMessageBox.information(self, "成功", f"图像已保存至 {output_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"保存图像时发生错误: {str(e)}")
+    
+    def export_calibration_data(self):
+        """导出校正参数 K、D，self.classes 以及原始图片名到 JSON 文件"""
+        if self.calibrator is None:
+            QMessageBox.warning(self, "错误", "校正器未初始化，请先完成校正")
+            return
+        if not hasattr(self.calibrator, 'K') or not hasattr(self.calibrator, 'D'):
+            QMessageBox.warning(self, "错误", "缺少必要的校正参数 K 或 D")
+            return
+        if not self.current_image_path:
+            QMessageBox.warning(self, "错误", "未加载原始图像路径")
+            return
+
+        # 构建要保存的数据
+        data = {
+            "camera_matrix": self.calibrator.K.tolist(),
+            "distortion_coefficients": self.calibrator.D.tolist(),
+            "classes": [
+                {
+                    'name': cls['name'],
+                    'points': [[round(float(x), 2), round(float(y), 2)] for x, y in cls['points']]
+                }
+                for cls in self.classes
+            ],
+            "original_image_name": self.current_image_path
+        }
+
+        # 确定输出目录和文件名
+        output_dir = "calibrationData"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"创建文件夹失败: {str(e)}")
+            return
+
+        original_name = os.path.splitext(os.path.basename(self.current_image_path))[0]
+        file_path = os.path.join(output_dir, f"{original_name}.json")
+
+        # 写入 JSON 文件
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+            QMessageBox.information(self, "成功", f"数据已保存至 {file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"写入文件失败: {str(e)}")
+
+    def load_calibration_data(self):
+        """从 JSON 文件加载校正数据并恢复图像和标注点"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择校正数据文件",
+            "",
+            "JSON Files (*.json)"
+        )
+        if not file_path:
+            return  # 用户取消操作
+
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            # 恢复校正参数
+            self.calibrator = type('Calibrator', (), {})
+            self.calibrator.K = np.array(data['camera_matrix'])
+            self.calibrator.D = np.array(data['distortion_coefficients'])
+
+            # 加载原始图像
+            image_path = data['original_image_name']
+            if not os.path.exists(image_path):
+                QMessageBox.warning(self, "错误", f"图像文件不存在: {image_path}")
+                return
+
+            self.current_image_path = image_path
+            self._load_image(image_path)
+
+            # 清除原有标注
+            for cls in self.classes:
+                for dot in cls['dots']:
+                    self.scene.removeItem(dot)
+            self.classes.clear()
+            self.coord_tree.clear()
+
+            # 恢复类别及标注点
+            for item in data['classes']:
+                color = QColor.fromHsv((len(self.classes) * 50) % 360, 255, 255)
+                new_class = {
+                    'name': item['name'],
+                    'color': color,
+                    'points': [(float(x), float(y)) for x, y in item['points']],
+                    'dots': []
+                }
+
+                for x, y in item['points']:
+                    point = QPointF(float(x), float(y))
+                    dot = QGraphicsEllipseItem(-3, -3, 6, 6)
+                    dot.setPos(point)
+                    dot.setBrush(QBrush(new_class['color']))
+                    self.scene.addItem(dot)
+                    new_class['dots'].append(dot)
+
+                self.classes.append(new_class)
+
+            self._update_coordinate_tree()
+            QMessageBox.information(self, "成功", "校正数据已加载")
+
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"加载失败: {str(e)}")
 
     def show_comparison(self, K, D):
         """显示原图与去畸变后的对比图"""
@@ -245,7 +403,8 @@ class ImageAnnotationApp(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "错误", f"去畸变失败: {str(e)}")
             return
-
+        
+        self.undistorted_img = undistorted_img
         # 拼接原图和去畸变后的图像
         comparison_img = np.hstack((self.image, undistorted_img))
         cv2.putText(comparison_img, 'Original', (10,30), 
